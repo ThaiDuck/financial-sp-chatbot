@@ -1,0 +1,6 @@
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- Fix collation version mismatch
+SELECT pg_sleep(1);
+ALTER DATABASE postgres REFRESH COLLATION VERSION;
+ALTER DATABASE finance_bot REFRESH COLLATION VERSION;
