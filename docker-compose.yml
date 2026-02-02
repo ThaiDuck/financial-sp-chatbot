@@ -1,0 +1,107 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg15
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-admin}
+      POSTGRES_DB: ${DB_NAME:-finance_bot}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --lc-collate=en_US.UTF-8 --lc-ctype=en_US.UTF-8"
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
+      LC_COLLATE: C
+      LC_CTYPE: C
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-pgvector.sql:/docker-entrypoint-initdb.d/01-pgvector.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    container_name: financial-api
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      - DB_USERNAME=${DB_USERNAME:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-admin}
+      - DB_HOST=postgres
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-finance_bot}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      - FMP_API_KEY=${FMP_API_KEY}
+      - EODHD_API_KEY=${EODHD_API_KEY}
+      - APISED_API_KEY=${APISED_API_KEY}
+      - GOLDAPI_KEY=${GOLDAPI_KEY}
+      - NEWSDATA_API_KEY=${NEWSDATA_API_KEY}
+      - NEWSAPI_KEY=${NEWSAPI_KEY}
+      - POLYGON_API_KEY=${POLYGON_API_KEY}
+      - FINNHUB_API_KEY=${FINNHUB_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    volumes:
+      - ./app:/app/app
+      - ./requirements.txt:/app/requirements.txt
+    command: >
+      sh -c "uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --timeout-keep-alive 90"
+
+  streamlit:
+    build: .
+    container_name: financial-streamlit
+    ports:
+      - "${UI_PORT:-8501}:8501"
+    environment:
+      - DB_USERNAME=${DB_USERNAME:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-admin}
+      - DB_HOST=postgres
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-finance_bot}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      - FMP_API_KEY=${FMP_API_KEY}
+      - EODHD_API_KEY=${EODHD_API_KEY}
+      - APISED_API_KEY=${APISED_API_KEY}
+      - GOLDAPI_KEY=${GOLDAPI_KEY}
+      - NEWSDATA_API_KEY=${NEWSDATA_API_KEY}
+      - NEWSAPI_KEY=${NEWSAPI_KEY}
+      - POLYGON_API_KEY=${POLYGON_API_KEY}
+      - FINNHUB_API_KEY=${FINNHUB_API_KEY}
+    depends_on:
+      api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    volumes:
+      - ./app:/app/app
+      - ./streamlit_app.py:/app/streamlit_app.py
+      - ./requirements.txt:/app/requirements.txt
+    command: >
+      sh -c "sleep 10 && streamlit run streamlit_app.py 
+      --server.port=8501 
+      --server.address=0.0.0.0 
+      --server.runOnSave=true"
+    stdin_open: true
+    tty: true
+
+volumes:
+  postgres_data:

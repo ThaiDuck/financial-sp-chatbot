@@ -1,0 +1,51 @@
+# Core
+fastapi==0.115.0
+uvicorn==0.32.0
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.9
+python-dotenv==1.0.1
+
+# LLM
+langchain==0.3.11
+langchain-core==0.3.52
+langchain-community==0.3.9
+langchain-google-genai
+google-generativeai
+
+# NLP
+sentence-transformers==3.0.1
+nltk==3.8.1
+
+# Data
+requests==2.32.3
+beautifulsoup4==4.12.3
+numpy==1.26.4
+pandas==2.2.3
+# ✅ REMOVED: yfinance
+vnstock  # VN stocks
+
+# API
+tavily-python==0.3.3
+psutil
+plotly
+
+# UI
+streamlit
+
+# DB
+pgvector==0.3.4
+
+# Utils
+aiohttp
+
+# Visualization
+matplotlib
+seaborn
+plotly
+
+# Image processing
+Pillow
+
+# News extraction
+newsapi-python
+
