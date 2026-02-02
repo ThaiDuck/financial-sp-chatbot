@@ -11,9 +11,9 @@ logger = logging.getLogger(__name__)
 
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# ✅ FIXED: Use stable model with better rate limits
-STABLE_MODEL = "gemini-2.5-flash-lite"  # Much better rate limits than 2.0-flash-exp
-EXPERIMENTAL_MODEL = "gemini-2.5-flash-lite"
+# ✅ FIXED: Use latest Gemini 3 Flash Preview model
+STABLE_MODEL = "gemini-3-flash-preview"
+EXPERIMENTAL_MODEL = "gemini-3-flash-preview"
 
 # ✅ NEW: Track API usage to avoid rate limits
 _last_api_call = 0
