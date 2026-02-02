@@ -39,16 +39,15 @@ def get_llm():
     }
     
     generation_config = {
-        "temperature": 0.3,
-        "top_p": 0.95,
+        "temperature": 0.2,  # Lower temperature for more consistent output
+        "top_p": 0.9,
         "top_k": 40,
         "max_output_tokens": 2048,
     }
-
     return ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash-lite",
+        model="gemini-3-flash-preview",
         google_api_key=GOOGLE_API_KEY,
-        temperature=0.3,
+        temperature=0.2,
         max_tokens=2048,
         safety_settings=safety_settings,
         generation_config=generation_config,
@@ -391,6 +390,7 @@ async def process_user_query(chain_dict, user_message, conversation_history=None
                 logger.info(f"Using minimal context (1 turn)")
             else:
                 contextual_query = user_message
+        
         else:
             contextual_query = user_message
         
