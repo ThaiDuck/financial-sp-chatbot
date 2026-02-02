@@ -63,9 +63,9 @@ class NewsProcessor:
             from ..config import GOOGLE_API_KEY
             
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash-lite",
+                model="gemini-3-flash-preview",
                 google_api_key=GOOGLE_API_KEY,
-                temperature=0.3,
+                temperature=0.2,
                 max_tokens=200
             )
             
