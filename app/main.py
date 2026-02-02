@@ -1,4 +1,40 @@
 import logging
+import weakref
+import atexit
+
+# ✅ FIX: Patch weakref.finalize to prevent "dictionary changed size during iteration" error
+def _safe_finalize_atexit():
+    """Safe atexit cleanup that handles dictionary iteration errors"""
+    try:
+        # Make a snapshot of pending finalizers to avoid iteration issues
+        pending = []
+        try:
+            registry_items = list(weakref.finalize._registry.items())
+            pending = [(f, i) for (f, i) in registry_items if i.atexit]
+        except (RuntimeError, AttributeError):
+            # Dictionary changed during iteration or no registry - skip
+            pass
+        
+        # Sort by index (LIFO order) and call
+        pending.sort(key=lambda x: x[1].index, reverse=True)
+        
+        for f, _ in pending:
+            try:
+                f()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+# Apply patch early before other imports
+try:
+    if hasattr(weakref.finalize, '_exitfunc'):
+        # Store original and replace with safe version
+        weakref.finalize._original_exitfunc = weakref.finalize._exitfunc
+        weakref.finalize._exitfunc = classmethod(lambda cls: _safe_finalize_atexit())
+except Exception:
+    pass
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
