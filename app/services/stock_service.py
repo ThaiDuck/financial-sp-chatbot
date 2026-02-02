@@ -5,7 +5,7 @@ from typing import List, Dict, Any, Optional
 import asyncio
 import time
 from ..database.models import VNStock
-from ..utils.vnstock_helper import fetch_stock_data, get_price_board
+from ..utils.vnstock_helper import fetch_stock_data, get_price_board, get_rate_limit_status
 
 logger = logging.getLogger(__name__)
 
@@ -25,16 +25,16 @@ def _set_cached_quote(symbol: str, data: Dict):
     """Cache quote data"""
     _quote_cache[symbol] = (data, time.time())
 
-async def fetch_vn_stock_data_batch(symbols: List[str], start_date=None, end_date=None, interval='1D', max_concurrent=5):
+async def fetch_vn_stock_data_batch(symbols: List[str], start_date=None, end_date=None, interval='1D', max_concurrent=2):
     """
-    ✅ FIXED: Add interval parameter
+    ✅ FIXED: Reduced concurrency to respect rate limits (20 req/min)
     
     Args:
         symbols: List of stock symbols
         start_date: Start date (YYYY-MM-DD)
         end_date: End date (YYYY-MM-DD)
         interval: Time interval ('1D', '1W', '1M', '1H', '30m', '15m', '5m', '1m')
-        max_concurrent: Max concurrent requests
+        max_concurrent: Max concurrent requests (reduced to 2 for safety)
     """
     if not start_date:
         start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
@@ -47,8 +47,13 @@ async def fetch_vn_stock_data_batch(symbols: List[str], start_date=None, end_dat
     if not valid_symbols:
         return []
     
+    # ✅ Check rate limit status before starting
+    rate_status = get_rate_limit_status()
+    logger.info(f"📊 Rate limit: {rate_status['requests_remaining']}/{18} remaining")
+    
     logger.info(f"Fetching {len(valid_symbols)} symbols: {valid_symbols} (interval={interval})")
     
+    # ✅ REDUCED: Only 2 concurrent to avoid hitting rate limit
     semaphore = asyncio.Semaphore(max_concurrent)
     
     async def fetch_single(symbol: str):
@@ -56,7 +61,7 @@ async def fetch_vn_stock_data_batch(symbols: List[str], start_date=None, end_dat
             try:
                 logger.info(f"Fetching {symbol}...")
                 
-                # ✅ Pass interval parameter
+                # ✅ Run in executor with built-in rate limiting
                 loop = asyncio.get_event_loop()
                 df = await loop.run_in_executor(
                     None,
@@ -64,7 +69,7 @@ async def fetch_vn_stock_data_batch(symbols: List[str], start_date=None, end_dat
                     symbol,
                     start_date,
                     end_date,
-                    interval  # ✅ Add interval
+                    interval
                 )
                 
                 if df is None or df.empty:
@@ -91,9 +96,22 @@ async def fetch_vn_stock_data_batch(symbols: List[str], start_date=None, end_dat
                 logger.error(f"✗ {symbol}: {e}")
                 return []
     
-    # Fetch all symbols concurrently
-    results = await asyncio.gather(*[fetch_single(s) for s in valid_symbols])
-    all_data = [item for sublist in results for item in sublist]
+    # ✅ Fetch sequentially for small batches to respect rate limits
+    if len(valid_symbols) <= 3:
+        # Sequential for small batches
+        all_data = []
+        for symbol in valid_symbols:
+            records = await fetch_single(symbol)
+            all_data.extend(records)
+    else:
+        # Parallel for larger batches (rate limiter will handle timing)
+        results = await asyncio.gather(*[fetch_single(s) for s in valid_symbols], return_exceptions=True)
+        all_data = []
+        for result in results:
+            if isinstance(result, list):
+                all_data.extend(result)
+            elif isinstance(result, Exception):
+                logger.error(f"Batch error: {result}")
     
     logger.info(f"Total: {len(all_data)} records from {len(valid_symbols)} symbols")
     return all_data
@@ -147,7 +165,7 @@ async def save_vn_stock_data(session, stock_data_list: List[Dict]) -> bool:
 
 async def get_latest_stock_price(session, symbol, is_vn_stock=True):
     """
-    ✅ FIXED: Get latest stock price with better error handling
+    ✅ FIXED: Graceful error handling - never crash on rate limit
     """
     if not is_vn_stock:
         from ..services.stock_us_service import USStockService
@@ -156,13 +174,13 @@ async def get_latest_stock_price(session, symbol, is_vn_stock=True):
     try:
         symbol = symbol.upper()
         
-        # ✅ CRITICAL FIX: Don't return early on cache hit, check DB first
+        # ✅ Check cache first
         cached_data = _get_cached_quote(symbol)
         if cached_data:
             logger.info(f"Returning cached data for {symbol}")
             return cached_data
         
-        # Try database first
+        # Try database first (no API call needed)
         one_day_ago = datetime.now() - timedelta(days=1)
         latest_price = session.query(VNStock)\
             .filter(VNStock.symbol == symbol)\
@@ -184,8 +202,14 @@ async def get_latest_stock_price(session, symbol, is_vn_stock=True):
             logger.info(f"✓ Found {symbol} in DB")
             return result
         
-        # ✅ Fetch from vnstock v3
-        logger.info(f"⚠️ No DB data for {symbol}, fetching from vnstock v3...")
+        # ✅ Check rate limit before API call
+        rate_status = get_rate_limit_status()
+        if rate_status['requests_remaining'] < 2:
+            logger.warning(f"⚠️ Rate limit low ({rate_status['requests_remaining']} remaining), skipping API call for {symbol}")
+            return None
+        
+        # ✅ Fetch from vnstock with error handling
+        logger.info(f"⚠️ No DB data for {symbol}, fetching from vnstock...")
         
         try:
             loop = asyncio.get_event_loop()
@@ -198,7 +222,6 @@ async def get_latest_stock_price(session, symbol, is_vn_stock=True):
             if price_board_df is not None and not price_board_df.empty:
                 row = price_board_df.iloc[0]
                 
-                # ✅ Extract with correct field names
                 open_price = float(row.get('open', row.get('refPrice', 0)))
                 close_price = float(row.get('lastPrice', row.get('close', 0)))
                 high_price = float(row.get('high', 0))
@@ -217,7 +240,7 @@ async def get_latest_stock_price(session, symbol, is_vn_stock=True):
                 
                 _set_cached_quote(symbol, result)
                 
-                # ✅ Save to database
+                # Save to database
                 stock = VNStock(**result)
                 session.add(stock)
                 try:
@@ -226,26 +249,31 @@ async def get_latest_stock_price(session, symbol, is_vn_stock=True):
                 except:
                     session.rollback()
                 
-                logger.info(f"✅ Fetched {symbol} from vnstock v3: {close_price:,.0f}")
+                logger.info(f"✅ Fetched {symbol} from vnstock: {close_price:,.0f}")
                 return result
                 
         except Exception as e:
-            logger.error(f"Error fetching from vnstock v3 for {symbol}: {e}")
+            # ✅ GRACEFUL: Log error but don't crash
+            logger.warning(f"⚠️ VNStock API error for {symbol}: {e} - returning None")
+            return None
         
-        # ✅ Return None if all methods fail
         logger.warning(f"❌ No data found for {symbol}")
         return None
         
     except Exception as e:
         logger.error(f"Error getting latest price for {symbol}: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
         return None
 
 async def get_vn_stock_quote(symbol):
     """Get real-time quote using Trading.price_board()"""
     try:
         symbol = symbol.upper()
+        
+        # ✅ Check rate limit first
+        rate_status = get_rate_limit_status()
+        if rate_status['requests_remaining'] < 2:
+            logger.warning(f"⚠️ Rate limit low, skipping quote for {symbol}")
+            return None
         
         loop = asyncio.get_event_loop()
         price_board_df = await loop.run_in_executor(
@@ -273,13 +301,12 @@ async def get_vn_stock_quote(symbol):
         return None
         
     except Exception as e:
-        logger.error(f"Error getting quote for {symbol}: {e}")
+        logger.warning(f"⚠️ Error getting quote for {symbol}: {e}")
         return None
 
 async def get_multiple_vn_stock_quotes(symbols: List[str]) -> Dict[str, Optional[Dict]]:
     """
-    Get real-time quotes for multiple stocks using Trading.price_board()
-    Much more efficient than individual calls!
+    ✅ FIXED: Batch request with rate limit protection
     """
     results = {}
     
@@ -300,7 +327,13 @@ async def get_multiple_vn_stock_quotes(symbols: List[str]) -> Dict[str, Optional
     if not uncached_symbols:
         return results
     
-    # Fetch ALL uncached symbols in ONE call (price_board supports multiple symbols!)
+    # ✅ Check rate limit before batch API call
+    rate_status = get_rate_limit_status()
+    if rate_status['requests_remaining'] < 2:
+        logger.warning(f"⚠️ Rate limit low, returning cached only")
+        return results
+    
+    # Fetch ALL uncached symbols in ONE call
     try:
         loop = asyncio.get_event_loop()
         price_board_df = await loop.run_in_executor(
@@ -311,7 +344,7 @@ async def get_multiple_vn_stock_quotes(symbols: List[str]) -> Dict[str, Optional
         
         if price_board_df is not None and not price_board_df.empty:
             for idx, row in price_board_df.iterrows():
-                symbol = row.get('ticker', row.get('symbol', uncached_symbols[idx]))
+                symbol = row.get('ticker', row.get('symbol', uncached_symbols[idx] if idx < len(uncached_symbols) else ''))
                 last_price = float(row.get('lastPrice', row.get('close', 0)))
                 ref_price = float(row.get('refPrice', row.get('open', last_price)))
                 
@@ -328,13 +361,15 @@ async def get_multiple_vn_stock_quotes(symbols: List[str]) -> Dict[str, Optional
                 results[symbol] = quote
                 
     except Exception as e:
-        logger.error(f"Error getting batch quotes: {e}")
+        logger.warning(f"⚠️ Error getting batch quotes: {e}")
     
     return results
 
 async def get_vn_company_profile(symbol):
     """Get company profile for a VN stock"""
     try:
+        from vnstock import Vnstock
+        
         symbol = symbol.upper()
         
         # Skip index symbols
@@ -342,9 +377,17 @@ async def get_vn_company_profile(symbol):
             logger.warning(f"Skipping index symbol {symbol} - indices are not supported")
             return None
         
+        # ✅ Check rate limit first
+        rate_status = get_rate_limit_status()
+        if rate_status['requests_remaining'] < 2:
+            logger.warning(f"⚠️ Rate limit low, skipping company profile for {symbol}")
+            return None
+        
         # Try to get company info using vnstock
         try:
-            info = vnstock.company_profile(symbol)
+            stock = Vnstock().stock(symbol=symbol, source='VCI')
+            info = stock.company.profile()
+            
             if info is not None and not info.empty:
                 row = info.iloc[0]
                 return {
@@ -374,6 +417,12 @@ async def calculate_vn_stock_technical_indicators(symbol, period="1mo"):
             logger.warning(f"Skipping index symbol {symbol} - indices are not supported")
             return {"error": "Market indices are not supported"}
         
+        # ✅ Check rate limit first
+        rate_status = get_rate_limit_status()
+        if rate_status['requests_remaining'] < 2:
+            logger.warning(f"⚠️ Rate limit low, skipping technical indicators for {symbol}")
+            return {"error": "Rate limit reached, please try again later"}
+        
         # Get historical data
         end_date = datetime.now()
         
@@ -387,12 +436,8 @@ async def calculate_vn_stock_technical_indicators(symbol, period="1mo"):
         start_date_str = start_date.strftime('%Y-%m-%d')
         end_date_str = end_date.strftime('%Y-%m-%d')
         
-        # Regular VN stock - simplified code without index handling
-        df = vnstock.stock_historical_data(
-            symbol=symbol,
-            start_date=start_date_str,
-            end_date=end_date_str
-        )
+        # ✅ Use rate-limited fetch_stock_data
+        df = fetch_stock_data(symbol, start_date_str, end_date_str, '1D')
             
         if df is None or df.empty:
             return {"error": f"No data available for {symbol}"}
@@ -405,18 +450,11 @@ async def calculate_vn_stock_technical_indicators(symbol, period="1mo"):
             
         # Calculate RSI (14-period)
         if len(df) > 14:
-            # Get price differences
             delta = df['close'].diff()
-            
-            # Get gains and losses
             gain = delta.mask(delta < 0, 0)
             loss = -delta.mask(delta > 0, 0)
-            
-            # Calculate average gain and loss
             avg_gain = gain.rolling(window=14).mean()
             avg_loss = loss.rolling(window=14).mean()
-            
-            # Calculate RS and RSI
             rs = avg_gain / avg_loss
             df['RSI'] = 100 - (100 / (1 + rs))
         
